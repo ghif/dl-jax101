@@ -19,11 +19,23 @@ Materi disusun secara bertahap untuk memudahkan proses belajar:
 
 ## Persiapan Lingkungan (Setup)
 
-Untuk menjalankan kode di repositori ini, disarankan menggunakan Python 3.8 ke atas. Anda dapat menginstal dependensi yang diperlukan dengan perintah berikut:
+Untuk menjalankan kode di repositori ini, disarankan menggunakan Python 3.8 ke atas. 
 
-```bash
-pip install -r requirements.txt
-```
+### Direkomendasikan: Menggunakan Conda
+Sangat disarankan untuk menggunakan [Conda](https://docs.conda.io/en/latest/) untuk mengelola *environment* Anda guna menghindari konflik dependensi.
+
+1.  **Buat environment baru**:
+    ```bash
+    conda create -n jax-env python=3.10
+    ```
+2.  **Aktifkan environment**:
+    ```bash
+    conda activate jax-env
+    ```
+3.  **Instal dependensi**:
+    ```bash
+    pip install -r requirements.txt
+    ```
 
 Jika Anda menggunakan GPU (NVIDIA), gunakan:
 
