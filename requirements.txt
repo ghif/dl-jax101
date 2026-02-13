@@ -1,0 +1,12 @@
+jax
+jaxlib
+flax
+optax
+pandas
+matplotlib
+seaborn
+grain
+scikit-learn
+librosa
+scikit-image
+safetensors

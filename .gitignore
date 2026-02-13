@@ -1,0 +1,21 @@
+# Exclude project memories
+GEMINI.md
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Jupyter Notebooks
+.ipynb_checkpoints
+
+# Environment
+.env
+.venv
+env/
+venv/
+.pt_mps/
+jax-cpu/
+
+# OS
+.DS_Store

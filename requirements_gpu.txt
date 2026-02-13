@@ -1,0 +1,14 @@
+jax[cuda12]==0.4.35
+jaxlib==0.4.34
+flax==0.10.2
+optax==0.2.2
+chex==0.1.86
+orbax-checkpoint==0.5.23
+pandas
+matplotlib
+seaborn
+grain
+scikit-learn
+librosa
+scikit-image
+safetensors
