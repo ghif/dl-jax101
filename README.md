@@ -7,6 +7,16 @@ Materi dalam repositori ini diadopsi dan dikembangkan lebih lanjut dari materi k
 ## Fokus Utama
 Berbeda dengan pendekatan sebelumnya yang menggunakan PyTorch, repositori ini berfokus pada optimisasi dan performa tinggi yang ditawarkan oleh ekosistem JAX (termasuk Flax dan Optax). Di sini, Anda akan menemukan tutorial interaktif dan implementasi model dari dasar hingga tingkat lanjut.
 
+## Visualisasi Hasil Pelatihan
+Berikut adalah beberapa contoh proses pelatihan model generatif yang diimplementasikan dalam repositori ini:
+
+| Denoising Autoencoder (MNIST) | Generative Adversarial Network (CIFAR-10) |
+|:---:|:---:|
+| ![DAE Training](assets/dae_training.gif) | ![GAN Training](assets/gan_training.gif) |
+| *Proses rekonstruksi gambar angka (MNIST)* | *Proses pembuatan gambar objek (CIFAR-10)* |
+
+Animasi di atas menunjukkan bagaimana model belajar dari waktu ke waktu untuk menghasilkan atau merekonstruksi data yang realistis.
+
 ## Struktur Repositori
 
 Materi disusun secara bertahap untuk memudahkan proses belajar:
