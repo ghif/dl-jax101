@@ -1,11 +1,11 @@
 # Deep Learning dengan JAX 101
 
-Repositori ini didedikasikan sebagai sumber pembelajaran untuk memahami dan mengimplementasi konsep-konsep **Deep Learning** menggunakan framework **JAX** dalam Bahasa Indonesia.
+Repositori ini didedikasikan sebagai sumber pembelajaran untuk memahami dan mengimplementasi konsep-konsep **Deep Learning** menggunakan framework **[JAX](https://docs.jax.dev/en/latest/)** dalam Bahasa Indonesia.
 
 Materi dalam repositori ini diadopsi dan dikembangkan lebih lanjut dari materi kuliah praktikum IF5281 Deep Learning, Institut Teknologi Bandung: [ghif/IF5281](https://github.com/ghif/IF5281).
 
 ## Fokus Utama
-Berbeda dengan pendekatan sebelumnya yang menggunakan PyTorch, repositori ini berfokus pada optimisasi dan performa tinggi yang ditawarkan oleh ekosistem JAX (termasuk Flax dan Optax). Di sini, Anda akan menemukan tutorial interaktif dan implementasi model dari dasar hingga tingkat lanjut.
+Berbeda dengan pendekatan sebelumnya yang menggunakan PyTorch, repositori ini berfokus pada optimisasi dan performa tinggi yang ditawarkan oleh ekosistem JAX (termasuk [Flax](https://flax.readthedocs.io/en/stable/nnx_basics.html) dan [Optax](https://optax.readthedocs.io/en/latest/)). Di sini, Anda akan menemukan tutorial interaktif dan implementasi model dari dasar hingga tingkat lanjut.
 
 ## Visualisasi Hasil Pelatihan
 Berikut adalah beberapa contoh proses pelatihan model generatif yang diimplementasikan dalam repositori ini:
