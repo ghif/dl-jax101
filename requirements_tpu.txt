@@ -1,0 +1,14 @@
+jax[tpu]
+jaxlib
+flax
+optax
+chex
+orbax-checkpoint
+pandas
+matplotlib
+seaborn
+grain
+scikit-learn
+librosa
+scikit-image
+safetensors
