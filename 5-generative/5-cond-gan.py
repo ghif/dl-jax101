@@ -1,6 +1,5 @@
 import jax
 print("Script started...")
-jax.config.update('jax_platform_name', 'cpu')
 import jax.numpy as jnp
 print("JAX initialized...")
 from flax import nnx
