@@ -38,7 +38,7 @@ NVIZ = 64
 NUM_CLASSES = 10
 
 DATASET = 'cifar10'
-checkpoint_dir = os.path.join(MODEL_DIR, f"cgan_{DATASET}_z{NZ}")
+checkpoint_dir = os.path.join(MODEL_DIR, f"cond-gan_{DATASET}_z{NZ}")
 sample_dir = os.path.join(checkpoint_dir, "samples")
 
 for d in [checkpoint_dir, sample_dir, DATA_DIR, 
