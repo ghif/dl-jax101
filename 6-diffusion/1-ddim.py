@@ -28,10 +28,13 @@ NUM_EPOCH = 50
 IMAGE_SIZE = 32 # CIFAR-10 default size
 NC = 3 
 LR = 2e-4
-TIMESTEPS = 1000
-SAMPLE_STEPS = 50 # DDIM sampling steps
+TIMESTEPS = 1.0 # Continuous time [0, 1]
+SAMPLE_STEPS = 20 # DDIM sampling steps
 NVIZ = 64
 DTYPE = jnp.bfloat16 # A100 optimized
+EMA_DECAY = 0.999
+MIN_SIGNAL_RATE = 0.02
+MAX_SIGNAL_RATE = 0.95
 
 DATASET = 'cifar10'
 checkpoint_dir = os.path.join(MODEL_DIR, f"ddim_{DATASET}")
@@ -102,21 +105,28 @@ def create_loader(data_source, batch_size, shuffle=True, seed=0):
 
 train_loader = create_loader(CIFARSource(X_train_all), BATCH_SIZE)
 
-# 2. DDIM Scheduler Logic
+# 2. DDIM Scheduler Logic (Cosine-based)
 class DDIMScheduler:
-    def __init__(self, timesteps=1000, beta_start=1e-4, beta_end=0.02):
-        self.timesteps = timesteps
-        self.betas = jnp.linspace(beta_start, beta_end, timesteps)
-        self.alphas = 1.0 - self.betas
-        self.alphas_cumprod = jnp.cumprod(self.alphas, axis=0)
+    def __init__(self, min_signal_rate=0.02, max_signal_rate=0.95):
+        self.min_signal_rate = min_signal_rate
+        self.max_signal_rate = max_signal_rate
         
-    def add_noise(self, x_start, noise, t):
-        # x_start: (N, H, W, C), noise: (N, H, W, C), t: (N,)
-        sqrt_alphas_cumprod_t = jnp.sqrt(self.alphas_cumprod[t])[:, None, None, None]
-        sqrt_one_minus_alphas_cumprod_t = jnp.sqrt(1 - self.alphas_cumprod[t])[:, None, None, None]
-        return sqrt_alphas_cumprod_t * x_start + sqrt_one_minus_alphas_cumprod_t * noise
+    def get_schedule(self, diffusion_times):
+        # diffusion_times: (N, 1, 1, 1) or scalar
+        start_angle = jnp.arccos(self.max_signal_rate)
+        end_angle = jnp.arccos(self.min_signal_rate)
+        
+        diffusion_angles = start_angle + diffusion_times * (end_angle - start_angle)
+        
+        signal_rates = jnp.cos(diffusion_angles)
+        noise_rates = jnp.sin(diffusion_angles)
+        return noise_rates, signal_rates
 
-scheduler = DDIMScheduler(TIMESTEPS)
+    def add_noise(self, x_start, noise, noise_rates, signal_rates):
+        # x_start: (N, H, W, C), noise: (N, H, W, C)
+        return signal_rates * x_start + noise_rates * noise
+
+scheduler = DDIMScheduler(MIN_SIGNAL_RATE, MAX_SIGNAL_RATE)
 
 # 3. Model Architecture (Simplified U-Net)
 class TimeEmbedding(nnx.Module):
@@ -125,18 +135,29 @@ class TimeEmbedding(nnx.Module):
         self.dtype = dtype
         self.mlp = nnx.Sequential(
             nnx.Linear(dim, dim * 4, param_dtype=jnp.float32, dtype=dtype, rngs=rngs),
-            nnx.relu,
+            nnx.swish,
             nnx.Linear(dim * 4, dim, param_dtype=jnp.float32, dtype=dtype, rngs=rngs)
         )
 
-    def __call__(self, t):
-        # Sinusoidal embedding
+    def __call__(self, noise_rates):
+        # noise_rates: (N, 1, 1, 1)
+        # Sinusoidal embedding matching the reference logic
         half_dim = self.dim // 2
-        emb = jnp.log(10000) / (half_dim - 1)
-        emb = jnp.exp(jnp.arange(half_dim) * -emb)
-        emb = t[:, None] * emb[None, :]
-        emb = jnp.concatenate([jnp.sin(emb), jnp.cos(emb)], axis=-1)
-        return self.mlp(emb.astype(self.dtype))
+        frequencies = jnp.exp(
+            jnp.linspace(
+                jnp.log(1.0),
+                jnp.log(1000.0),
+                half_dim,
+            )
+        )
+        angular_speeds = 2.0 * jnp.pi * frequencies
+        # Reshape noise_rates to (N, 1) for embedding then back to (N, 1, 1, dim)
+        x = noise_rates.reshape(-1, 1)
+        embeddings = jnp.concatenate(
+            [jnp.sin(angular_speeds * x), jnp.cos(angular_speeds * x)], axis=-1
+        )
+        # Resulting embeddings: (N, dim)
+        return self.mlp(embeddings.astype(self.dtype))
 
 class ResBlock(nnx.Module):
     def __init__(self, in_ch, out_ch, time_dim, rngs: nnx.Rngs, dtype=jnp.float32):
@@ -146,57 +167,57 @@ class ResBlock(nnx.Module):
         self.time_proj = nnx.Linear(time_dim, out_ch, param_dtype=jnp.float32, dtype=dtype, rngs=rngs)
         self.conv2 = nnx.Conv(out_ch, out_ch, (3, 3), padding='SAME', param_dtype=jnp.float32, dtype=dtype, rngs=rngs)
         self.bn2 = nnx.BatchNorm(out_ch, param_dtype=jnp.float32, dtype=dtype, rngs=rngs)
-        self.shortcut = nnx.Linear(in_ch, out_ch, param_dtype=jnp.float32, dtype=dtype, rngs=rngs) if in_ch != out_ch else (lambda x: x)
+        self.shortcut = nnx.Conv(in_ch, out_ch, (1, 1), param_dtype=jnp.float32, dtype=dtype, rngs=rngs) if in_ch != out_ch else (lambda x: x)
 
     def __call__(self, x, t_emb, train=True):
-        h = nnx.relu(self.bn1(self.conv1(x), use_running_average=not train))
-        h = h + self.time_proj(nnx.relu(t_emb))[:, None, None, :]
-        h = nnx.relu(self.bn2(self.conv2(h), use_running_average=not train))
+        h = nnx.swish(self.bn1(self.conv1(x), use_running_average=not train))
+        h = h + self.time_proj(nnx.swish(t_emb))[:, None, None, :]
+        h = nnx.swish(self.bn2(self.conv2(h), use_running_average=not train))
         return h + self.shortcut(x)
 
 class UNet(nnx.Module):
-    def __init__(self, in_ch, base_ch, rngs: nnx.Rngs, dtype=jnp.float32):
-        time_dim = base_ch * 4
+    def __init__(self, in_ch, widths, rngs: nnx.Rngs, dtype=jnp.float32):
+        time_dim = widths[0] * 4
         self.dtype = dtype
         self.time_mlp = TimeEmbedding(time_dim, rngs, dtype=dtype)
         
         # Encoder
-        self.inc = nnx.Conv(in_ch, base_ch, (3, 3), padding='SAME', param_dtype=jnp.float32, dtype=dtype, rngs=rngs)
-        self.down1 = ResBlock(base_ch, base_ch * 2, time_dim, rngs, dtype=dtype)
-        self.down2 = ResBlock(base_ch * 2, base_ch * 4, time_dim, rngs, dtype=dtype)
+        self.inc = nnx.Conv(in_ch, widths[0], (3, 3), padding='SAME', param_dtype=jnp.float32, dtype=dtype, rngs=rngs)
+        self.down1 = ResBlock(widths[0], widths[1], time_dim, rngs, dtype=dtype)
+        self.down2 = ResBlock(widths[1], widths[2], time_dim, rngs, dtype=dtype)
         
         # Bottleneck
-        self.mid1 = ResBlock(base_ch * 4, base_ch * 4, time_dim, rngs, dtype=dtype)
-        self.mid2 = ResBlock(base_ch * 4, base_ch * 4, time_dim, rngs, dtype=dtype)
+        self.mid1 = ResBlock(widths[2], widths[3], time_dim, rngs, dtype=dtype)
+        self.mid2 = ResBlock(widths[3], widths[3], time_dim, rngs, dtype=dtype)
         
         # Decoder
-        self.up1 = ResBlock(base_ch * 8, base_ch * 2, time_dim, rngs, dtype=dtype) # + skip
-        self.up2 = ResBlock(base_ch * 4, base_ch, time_dim, rngs, dtype=dtype) # + skip
-        self.outc = nnx.Conv(base_ch, in_ch, (1, 1), param_dtype=jnp.float32, dtype=dtype, rngs=rngs)
+        self.up1 = ResBlock(widths[3] + widths[2], widths[1], time_dim, rngs, dtype=dtype) # + skip
+        self.up2 = ResBlock(widths[1] + widths[1], widths[0], time_dim, rngs, dtype=dtype) # + skip
+        self.outc = nnx.Conv(widths[0], in_ch, (1, 1), param_dtype=jnp.float32, dtype=dtype, rngs=rngs, kernel_init=nnx.initializers.zeros)
 
-    def __call__(self, x, t, train=True):
-        t_emb = self.time_mlp(t)
+    def __call__(self, x, noise_rates, train=True):
+        t_emb = self.time_mlp(noise_rates)
         
         # Cast input to dtype
         x = x.astype(self.dtype)
         
-        x1 = self.inc(x) # (32, 32, 64)
+        x1 = self.inc(x) 
         x2 = self.down1(x1, t_emb, train)
-        x2_pool = nnx.avg_pool(x2, (2, 2), strides=(2, 2)) # (16, 16, 128)
+        x2_pool = nnx.avg_pool(x2, (2, 2), strides=(2, 2)) 
         
         x3 = self.down2(x2_pool, t_emb, train)
-        x3_pool = nnx.avg_pool(x3, (2, 2), strides=(2, 2)) # (8, 8, 256)
+        x3_pool = nnx.avg_pool(x3, (2, 2), strides=(2, 2)) 
         
         h = self.mid1(x3_pool, t_emb, train)
         h = self.mid2(h, t_emb, train)
         
         # Upsample 1
-        h = jax.image.resize(h, (h.shape[0], 16, 16, h.shape[-1]), method='bilinear')
+        h = jax.image.resize(h, (h.shape[0], IMAGE_SIZE//2, IMAGE_SIZE//2, h.shape[-1]), method='bilinear')
         h = jnp.concatenate([h, x3], axis=-1)
         h = self.up1(h, t_emb, train)
         
         # Upsample 2
-        h = jax.image.resize(h, (h.shape[0], 32, 32, h.shape[-1]), method='bilinear')
+        h = jax.image.resize(h, (h.shape[0], IMAGE_SIZE, IMAGE_SIZE, h.shape[-1]), method='bilinear')
         h = jnp.concatenate([h, x2], axis=-1)
         h = self.up2(h, t_emb, train)
         
@@ -204,54 +225,72 @@ class UNet(nnx.Module):
 
 # 4. Training Logic
 rngs = nnx.Rngs(0)
-model = UNet(in_ch=NC, base_ch=64, rngs=rngs, dtype=DTYPE)
-optimizer = nnx.Optimizer(model, optax.adam(LR), wrt=nnx.Param)
+WIDTHS = [32, 64, 96, 128]
+model = UNet(in_ch=NC, widths=WIDTHS, rngs=rngs, dtype=DTYPE)
+# EMA Model for inference
+ema_model = UNet(in_ch=NC, widths=WIDTHS, rngs=rngs, dtype=DTYPE)
+# Initialize EMA weights with model weights
+nnx.update(ema_model, nnx.state(model, nnx.Param))
+optimizer = nnx.Optimizer(model, optax.adamw(LR, weight_decay=1e-4), wrt=nnx.Param)
 
 @nnx.jit
-def train_step(model, optimizer, x_start, t, noise):
-    # Prepare x_noisy in float32 for scheduler stability, then cast during model call
-    x_noisy = scheduler.add_noise(x_start, noise, t)
+def train_step(model, ema_model, optimizer, x_start, noise, diffusion_times):
+    # Prepare rates
+    noise_rates, signal_rates = scheduler.get_schedule(diffusion_times)
+    
+    # Mix images with noise (forward diffusion)
+    x_noisy = scheduler.add_noise(x_start, noise, noise_rates, signal_rates)
     
     def loss_fn(model):
-        pred_noise = model(x_noisy, t, train=True)
-        # Loss calculation in float32
-        return jnp.mean((noise.astype(jnp.float32) - pred_noise.astype(jnp.float32))**2)
+        pred_noise = model(x_noisy, noise_rates, train=True)
+        # Loss calculation in float32: MAE as per reference
+        return jnp.mean(jnp.abs(noise.astype(jnp.float32) - pred_noise.astype(jnp.float32)))
     
     loss, grads = nnx.value_and_grad(loss_fn)(model)
     optimizer.update(model, grads)
+    
+    # Update EMA model weights
+    # Get states for Parameters only
+    model_state = nnx.state(model, nnx.Param)
+    ema_state = nnx.state(ema_model, nnx.Param)
+    
+    new_ema_state = jax.tree.map(
+        lambda p, e: EMA_DECAY * e + (1 - EMA_DECAY) * p,
+        model_state, ema_state
+    )
+    nnx.update(ema_model, new_ema_state)
+    
     return loss
 
 # 5. DDIM Sampling Logic
 @nnx.jit
-def sample_ddim(model, x_t, t, t_prev, eta=0.0):
-    # Deterministic sampling (eta=0)
-    pred_noise = model(x_t, t, train=False)
+def sample_ddim(model, x_t, noise_rates, signal_rates, next_noise_rates, next_signal_rates):
+    # Deterministic sampling (eta=0) as per reference remix logic
+    pred_noise = model(x_t, noise_rates, train=False)
     
-    alpha_t = scheduler.alphas_cumprod[t][:, None, None, None]
-    alpha_prev = scheduler.alphas_cumprod[t_prev][:, None, None, None]
+    # 1. pred_image (x0 prediction)
+    pred_image = (x_t - noise_rates * pred_noise) / signal_rates
     
-    # 1. x0 prediction
-    pred_x0 = (x_t - jnp.sqrt(1 - alpha_t) * pred_noise) / jnp.sqrt(alpha_t)
+    # 2. next_noisy_image (x_prev)
+    x_prev = next_signal_rates * pred_image + next_noise_rates * pred_noise
     
-    # 2. direction pointing to xt
-    dir_xt = jnp.sqrt(1 - alpha_prev) * pred_noise
-    
-    # 3. next step
-    x_prev = jnp.sqrt(alpha_prev) * pred_x0 + dir_xt
-    return x_prev
+    return x_prev, pred_image
 
 def generate_samples(model, num_samples=16):
     x = jax.random.normal(jax.random.PRNGKey(42), (num_samples, IMAGE_SIZE, IMAGE_SIZE, NC))
     
-    # Subsample timesteps for DDIM
-    indices = jnp.linspace(TIMESTEPS - 1, 0, SAMPLE_STEPS).astype(jnp.int32)
+    step_size = 1.0 / SAMPLE_STEPS
     
-    for i in tqdm(range(len(indices) - 1), desc="Sampling", leave=False):
-        t = jnp.full((num_samples,), indices[i])
-        t_prev = jnp.full((num_samples,), indices[i+1])
-        x = sample_ddim(model, x, t, t_prev)
+    for i in tqdm(range(SAMPLE_STEPS), desc="Sampling", leave=False):
+        diffusion_times = jnp.full((num_samples, 1, 1, 1), 1.0 - i * step_size)
+        next_diffusion_times = diffusion_times - step_size
+        
+        noise_rates, signal_rates = scheduler.get_schedule(diffusion_times)
+        next_noise_rates, next_signal_rates = scheduler.get_schedule(next_diffusion_times)
+        
+        x, pred_image = sample_ddim(model, x, noise_rates, signal_rates, next_noise_rates, next_signal_rates)
     
-    return x
+    return pred_image # Reference returns the final predicted images
 
 # 6. Main Training Loop
 print("Starting DDIM Training...")
@@ -264,19 +303,19 @@ for epoch in range(NUM_EPOCH):
         for x_start in tepoch:
             step_rng, rng_t, rng_n = jax.random.split(step_rng, 3)
             
-            # Sample random timesteps
-            t = jax.random.randint(rng_t, (x_start.shape[0],), 0, TIMESTEPS)
+            # Sample continuous random timesteps [0, 1]
+            diffusion_times = jax.random.uniform(rng_t, (x_start.shape[0], 1, 1, 1))
             # Sample noise
             noise = jax.random.normal(rng_n, x_start.shape)
             
-            loss = train_step(model, optimizer, x_start, t, noise)
+            loss = train_step(model, ema_model, optimizer, x_start, noise, diffusion_times)
             total_loss += loss
             num_batches += 1
             tepoch.set_postfix(loss=f"{loss:.4f}")
             
     avg_loss = total_loss / num_batches
     print(f"Epoch {epoch+1} complete. Average Loss: {avg_loss:.4f}. Generating samples...")
-    samples = generate_samples(model, num_samples=NVIZ)
+    samples = generate_samples(ema_model, num_samples=NVIZ)
     grid = vu.set_grid(samples, num_cells=NVIZ)
     plt.figure(figsize=(10, 10))
     plt.imshow(np.transpose(np.array(vu.normalize(grid, 0, 1)), (1, 2, 0)))
